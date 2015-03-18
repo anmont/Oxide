@@ -1,17 +1,9 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
-using Jint;
-using Jint.Native;
-using Jint.Native.Error;
-using Jint.Native.Object;
-using Jint.Parser;
-using Jint.Runtime;
-using Jint.Runtime.Descriptors;
-using Jint.Runtime.Interop;
-
-using Microsoft.Scripting.Ast;
+using V8.Net;
 
 using Oxide.Core;
 using Oxide.Core.Extensions;
@@ -47,14 +39,16 @@ namespace Oxide.Ext.JavaScript
         /// <summary>
         /// Gets the JavaScript engine
         /// </summary>
-        public Engine JavaScriptEngine { get; private set; }
+        public V8Engine JavaScriptEngine { get; private set; }
 
         // The plugin change watcher
         private FSWatcher watcher;
 
         // The plugin loader
         private JavaScriptPluginLoader loader;
+        private readonly List<V8Function> funcs;
 
+        // Whitelists
         private static readonly string[] WhitelistAssemblies = { "Assembly-CSharp", "DestMath", "mscorlib", "Oxide.Core", "protobuf-net", "RustBuild", "System", "System.Core", "UnityEngine" };
         private static readonly string[] WhitelistNamespaces = { "Dest", "Facepunch", "Network", "ProtoBuf", "PVT", "Rust", "Steamworks", "System.Collections", "UnityEngine" };
 
@@ -65,18 +59,7 @@ namespace Oxide.Ext.JavaScript
         public JavaScriptExtension(ExtensionManager manager)
             : base(manager)
         {
-            ExceptionHandler.RegisterType(typeof(JavaScriptException), ex =>
-            {
-                var jintEx = (JavaScriptException) ex;
-                var obj = jintEx.Error.ToObject() as ErrorInstance;
-                if (obj != null) return string.Format("File: {0} Line: {1} Column: {2} {3} {4}:{5}{6}", jintEx.Location.Source, jintEx.LineNumber, jintEx.Column, obj.Get("name").AsString(), obj.Get("message").AsString(), Environment.NewLine, jintEx.StackTrace);
-                return string.Format("File: {0} Line: {1} Column: {2} {3}:{4}{5}", jintEx.Location.Source, jintEx.LineNumber, jintEx.Column, jintEx.Message, Environment.NewLine, jintEx.StackTrace);
-            });
-            ExceptionHandler.RegisterType(typeof(ParserException), ex =>
-            {
-                var parserEx = (ParserException)ex;
-                return string.Format("File: {0} Line: {1} Column: {2} {3}:{4}{5}", parserEx.Source, parserEx.LineNumber, parserEx.Column, parserEx.Description, Environment.NewLine, parserEx.StackTrace);
-            });
+            funcs = new List<V8Function>();
         }
 
         /// <summary>
@@ -98,16 +81,45 @@ namespace Oxide.Ext.JavaScript
         private void InitializeJavaScript()
         {
             // Create the JavaScript engine
-            JavaScriptEngine = new Engine(cfg => cfg.AllowClr(AppDomain.CurrentDomain.GetAssemblies().Where(AllowAssemblyAccess).ToArray()));
-            JavaScriptEngine.Global.FastSetProperty("importNamespace", new PropertyDescriptor(new ClrFunctionInstance(JavaScriptEngine, (thisObj, arguments) =>
+            JavaScriptEngine = new V8Engine();
+            // Bind all namespaces and types
+            foreach (var type in AppDomain.CurrentDomain.GetAssemblies()
+                .Where(AllowAssemblyAccess)
+                .SelectMany(Utility.GetAllTypesFromAssembly)
+                .Where(AllowTypeAccess))
             {
-                var nspace = TypeConverter.ToString(arguments.At(0));
-                if (string.IsNullOrEmpty(nspace) || WhitelistNamespaces.Any(nspace.StartsWith) || nspace.Equals("System"))
+                // Get the namespace object
+                ObjectHandle namespaceObject = GetNamespaceObject(Utility.GetNamespace(type));
+                // Bind the type
+                JavaScriptEngine.RegisterType(type, null, true, ScriptMemberSecurity.Locked);
+                namespaceObject.SetProperty(type);
+            }
+        }
+
+        /// <summary>
+        /// Gets the namespace object for the specified namespace
+        /// </summary>
+        /// <param name="nspace"></param>
+        /// <returns></returns>
+        private ObjectHandle GetNamespaceObject(string nspace)
+        {
+            if (string.IsNullOrEmpty(nspace))
+            {
+                return JavaScriptEngine.GlobalObject;
+            }
+            string[] nspacesplit = nspace.Split('.');
+            ObjectHandle curObject = JavaScriptEngine.GlobalObject;
+            foreach (string t in nspacesplit)
+            {
+                ObjectHandle prevObject = curObject;
+                if (prevObject.GetProperty(t).ValueType != JSValueType.Object)
                 {
-                    return new NamespaceReference(JavaScriptEngine, nspace);
+                    curObject = JavaScriptEngine.CreateObject();
+                    prevObject.SetProperty(t, curObject);
                 }
-                return JsValue.Null;
-            }), false, false, false));
+                curObject = prevObject.GetProperty(t);
+            }
+            return curObject;
         }
 
         /// <summary>
@@ -121,29 +133,43 @@ namespace Oxide.Ext.JavaScript
         }
 
         /// <summary>
+        /// Returns if the specified type should be bound to JavaScript or not
+        /// </summary>
+        /// <param name="type"></param>
+        /// <returns></returns>
+        internal bool AllowTypeAccess(Type type)
+        {
+            // Special case: allow access to Oxide.Core.OxideMod
+            if (type.FullName == "Oxide.Core.OxideMod") return true;
+            // The only exception is to allow all value types directly under System
+            string nspace = Utility.GetNamespace(type);
+            if (string.IsNullOrEmpty(nspace)) return true;
+            if (nspace == "System" && (type.IsValueType || type.Name == "String")) return true;
+            foreach (string whitelist in WhitelistNamespaces)
+                if (nspace.StartsWith(whitelist)) return true;
+            return false;
+        }
+
+        /// <summary>
         /// Loads a library into the specified path
         /// </summary>
         /// <param name="library"></param>
         /// <param name="path"></param>
         public void LoadLibrary(Library library, string path)
         {
-            ObjectInstance scope = null;
+            ObjectHandle scope;
             if (library.IsGlobal)
             {
-                scope = JavaScriptEngine.Global;
+                scope = JavaScriptEngine.GlobalObject;
             }
-            else if (JavaScriptEngine.Global.GetProperty(path) == PropertyDescriptor.Undefined)
+            else if (JavaScriptEngine.GlobalObject.GetProperty(path).ValueType == JSValueType.Undefined)
             {
-                JavaScriptEngine.Global.FastAddProperty(path, new LibraryWrapper(JavaScriptEngine, library) { Extensible = true }, true, false, true);
-                return;
-                //scope = new ObjectInstance(JavaScriptEngine) { Extensible = true };
-                //JavaScriptEngine.Global.FastAddProperty(path, scope, true, false, true);
+                scope = JavaScriptEngine.CreateObject();
+                JavaScriptEngine.GlobalObject.SetProperty(path, scope);
             }
             else
             {
-                var jsValue = JavaScriptEngine.Global.GetProperty(path).Value;
-                if (jsValue != null)
-                    scope = jsValue.Value.AsObject();
+                scope = JavaScriptEngine.GlobalObject.GetProperty(path);
             }
             if (scope == null)
             {
@@ -153,24 +179,29 @@ namespace Oxide.Ext.JavaScript
             foreach (string name in library.GetFunctionNames())
             {
                 MethodInfo method = library.GetFunction(name);
-
-                var typeArgs = method.GetParameters()
-                    .Select(p => p.ParameterType)
-                    .ToList();
-
-                Type delegateType;
-                if (method.ReturnType == typeof(void))
+                var expectedParameters = method.GetParameters();
+                //var expectedGenericTypes = method.IsGenericMethodDefinition ? method.GetGenericArguments() : new Type[0];
+                //Interface.GetMod().RootLogger.Write(LogType.Info, "IsGeneric: " + method.IsGenericMethodDefinition + " Params: " + string.Join(",", expectedGenericTypes.Select((o) => o.ToString()).ToArray()));
+                var template = JavaScriptEngine.CreateFunctionTemplate(name);
+                //var name1 = name;
+                //Dictionary<int, object[]> convertedArgumentArrayCache = new Dictionary<int, object[]>();
+                //convertedArgumentArrayCache[expectedParameters.Length] = new object[expectedParameters.Length];
+                var convertedArguments = new object[expectedParameters.Length];
+                var func = template.GetFunctionObject((engine, call, @this, args) =>
                 {
-                    delegateType = Expression.GetActionType(typeArgs.ToArray());
-
-                }
-                else
-                {
-                    typeArgs.Add(method.ReturnType);
-                    delegateType = Expression.GetFuncType(typeArgs.ToArray());
-                }
-
-                scope.FastAddProperty(name, new DelegateWrapper(JavaScriptEngine, Delegate.CreateDelegate(delegateType, library, method)), true, false, true);
+                    var argInfos = ArgInfo.GetArguments(args, 0, expectedParameters);
+                    for (var paramIndex = 0; paramIndex < argInfos.Length; paramIndex++)
+                    {
+                        var tInfo = argInfos[paramIndex];
+                        if (tInfo.HasError) throw tInfo.Error;
+                        convertedArguments[paramIndex] = tInfo.ValueOrDefault;
+                    }
+                    //Manager.Logger.Write(LogType.Info, "Callback: " + name1 + " Params: " + string.Join(",", convertedArguments.Select((o)=> o.ToString()).ToArray()));
+                    var result = method.Invoke(library, convertedArguments);
+                    return method.ReturnType == typeof(void) ? InternalHandle.Empty : JavaScriptEngine.CreateValue(result, true);
+                });
+                scope.SetProperty(name, func);
+                funcs.Add(func);
             }
         }
 

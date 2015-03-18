@@ -27,7 +27,8 @@ function bundle_rust {
     Oxide.Ext.Unity/bin/x64/Release/Oxide.Ext.Unity.dll \
     $HOME/temp_rust/RustDedicated_Data/Managed || die_with "Failed to copy core and extension DLLs!"
     cp -vf Oxide.Ext.CSharp/Dependencies/Mono.Cecil.dll \
-    Oxide.Ext.JavaScript/Dependencies/Jint.dll \
+    Oxide.Ext.JavaScript/Dependencies/x64 \
+    Oxide.Ext.JavaScript/Dependencies/V8*.dll \
     Oxide.Ext.Lua/Dependencies/*Lua.dll \
     Oxide.Ext.MySql/Dependencies/*.dll \
     Oxide.Ext.Python/Dependencies/*.dll \
@@ -68,7 +69,8 @@ function bundle_7dtd {
     $HOME/temp_7dtd/7DaysToDie_Data/Managed || die_with "Failed to copy core and extension DLLs!"
     cp -vf Oxide.Core/Dependencies/Newtonsoft.Json.dll \
     Oxide.Ext.CSharp/Dependencies/Mono.Cecil.dll \
-    Oxide.Ext.JavaScript/Dependencies/Jint.dll \
+    Oxide.Ext.JavaScript/Dependencies/x64 \
+    Oxide.Ext.JavaScript/Dependencies/V8*.dll \
     Oxide.Ext.Lua/Dependencies/*Lua.dll \
     Oxide.Ext.MySql/Dependencies/*.dll \
     Oxide.Ext.Python/Dependencies/*.dll \

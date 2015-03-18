@@ -1,10 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Reflection;
 
-using Jint;
-using Jint.Native;
-using Jint.Native.Array;
-using Jint.Native.Object;
+using V8.Net;
 
 using Oxide.Core.Configuration;
 
@@ -20,14 +18,14 @@ namespace Oxide.Ext.JavaScript
         /// </summary>
         /// <param name="config"></param>
         /// <param name="objectInstance"></param>
-        public static void SetConfigFromObject(DynamicConfigFile config, ObjectInstance objectInstance)
+        public static void SetConfigFromObject(DynamicConfigFile config, InternalHandle objectInstance)
         {
             config.Clear();
-            foreach (var property in objectInstance.Properties)
+            foreach (var property in objectInstance.GetPropertyNames())
             {
-                if (property.Value.Value == null) continue;
-                object value = property.Value.Value.Value.ToObject();
-                if (value != null) config[property.Key] = value;
+                if (objectInstance.GetProperty(property).ValueType == JSValueType.Undefined) continue;
+                object value = objectInstance.GetProperty(property).As<object>();
+                if (value != null) config[property] = value;
             }
         }
 
@@ -37,39 +35,18 @@ namespace Oxide.Ext.JavaScript
         /// <param name="config"></param>
         /// <param name="engine"></param>
         /// <returns></returns>
-        public static ObjectInstance ObjectFromConfig(DynamicConfigFile config, Engine engine)
+        public static InternalHandle ObjectFromConfig(DynamicConfigFile config, V8Engine engine)
         {
-            var objInst = new ObjectInstance(engine) {Extensible = true};
+            var tbl = engine.CreateObject();
+            // Loop each item in config
             foreach (var pair in config)
             {
-                objInst.FastAddProperty(pair.Key, JsValueFromObject(pair.Value, engine), true, true, true);
+                // Translate and set on object
+                tbl.SetProperty(pair.Key, engine.CreateValue(pair.Value));
             }
-            return objInst;
-        }
 
-        public static JsValue JsValueFromObject(object obj, Engine engine)
-        {
-            var values = obj as List<object>;
-            if (values != null)
-            {
-                var jsValues = new List<JsValue>();
-                foreach (var v in values)
-                    jsValues.Add(JsValueFromObject(v, engine));
-                var array = (ArrayInstance) engine.Array.Construct(jsValues.ToArray());
-                array.Extensible = true;
-                return array;
-            }
-            var dict = obj as Dictionary<string, object>;
-            if (dict != null)
-            {
-                var objInst = new ObjectInstance(engine) { Extensible = true };
-                foreach (var pair in dict)
-                {
-                    objInst.FastAddProperty(pair.Key, JsValueFromObject(pair.Value, engine), true, true, true);
-                }
-                return objInst;
-            }
-            return JsValue.FromObject(engine, obj);
+            // Return
+            return tbl;
         }
 
         /// <summary>
@@ -80,6 +57,34 @@ namespace Oxide.Ext.JavaScript
         public static string GetNamespace(Type type)
         {
             return type.Namespace ?? string.Empty;
+        }
+
+        public static IEnumerable<Type> GetAllTypesFromAssembly(Assembly asm)
+        {
+            foreach (var module in asm.GetModules())
+            {
+                Type[] moduleTypes;
+                try
+                {
+                    moduleTypes = module.GetTypes();
+                }
+                catch (ReflectionTypeLoadException e)
+                {
+                    moduleTypes = e.Types;
+                }
+                catch (Exception)
+                {
+                    moduleTypes = new Type[0];
+                }
+
+                foreach (var type in moduleTypes)
+                {
+                    if (type != null)
+                    {
+                        yield return type;
+                    }
+                }
+            }
         }
     }
 }

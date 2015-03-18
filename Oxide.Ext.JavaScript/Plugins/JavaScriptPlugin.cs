@@ -2,14 +2,9 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Linq.Expressions;
 using System.Reflection;
 
-using Jint;
-using Jint.Native;
-using Jint.Native.Object;
-using Jint.Parser;
-using Jint.Runtime.Interop;
+using V8.Net;
 
 using Oxide.Core;
 using Oxide.Core.Plugins;
@@ -25,12 +20,12 @@ namespace Oxide.Ext.JavaScript.Plugins
         /// <summary>
         /// Gets the JavaScript Engine
         /// </summary>
-        public Engine JavaScriptEngine { get; private set; }
+        public V8Engine JavaScriptEngine { get; private set; }
 
         /// <summary>
         /// Gets this plugin's JavaScript Class
         /// </summary>
-        public ObjectInstance Class { get; private set; }
+        public ObjectHandle Class { get; private set; }
 
         /// <summary>
         /// Gets the object associated with this plugin
@@ -47,18 +42,21 @@ namespace Oxide.Ext.JavaScript.Plugins
         // The plugin change watcher
         private readonly FSWatcher watcher;
 
+        private readonly List<V8Function> funcs;
+
         /// <summary>
         /// Initializes a new instance of the JavaScriptPlugin class
         /// </summary>
         /// <param name="filename"></param>
-        /// <param name="engine"></param>
+        /// <param name="v8Engine"></param>
         /// <param name="watcher"></param>
-        internal JavaScriptPlugin(string filename, Engine engine, FSWatcher watcher)
+        internal JavaScriptPlugin(string filename, V8Engine v8Engine, FSWatcher watcher)
         {
             // Store filename
             Filename = filename;
-            JavaScriptEngine = engine;
+            JavaScriptEngine = v8Engine;
             this.watcher = watcher;
+            funcs = new List<V8Function>();
         }
 
         #region Config
@@ -71,14 +69,7 @@ namespace Oxide.Ext.JavaScript.Plugins
             Config.Clear();
             if (Class != null)
             {
-                if (Class.HasProperty("Config"))
-                {
-                    Class.Put("Config", new ObjectInstance(JavaScriptEngine) { Extensible = true }, true);
-                }
-                else
-                {
-                    Class.FastAddProperty("Config", new ObjectInstance(JavaScriptEngine) { Extensible = true }, true, false, true);
-                }
+                Class.SetProperty("Config", JavaScriptEngine.CreateObject());
             }
             CallHook("LoadDefaultConfig", null);
         }
@@ -91,14 +82,7 @@ namespace Oxide.Ext.JavaScript.Plugins
             base.LoadConfig();
             if (Class != null)
             {
-                if (Class.HasProperty("Config"))
-                {
-                    Class.Put("Config", Utility.ObjectFromConfig(Config, JavaScriptEngine), true);
-                }
-                else
-                {
-                    Class.FastAddProperty("Config", Utility.ObjectFromConfig(Config, JavaScriptEngine), true, true, true);
-                }
+                Class.SetProperty("Config", Utility.ObjectFromConfig(Config, JavaScriptEngine));
             }
         }
 
@@ -109,10 +93,7 @@ namespace Oxide.Ext.JavaScript.Plugins
         {
             if (Config == null) return;
             if (Class == null) return;
-            if (Class.HasProperty("Config"))
-            {
-                Utility.SetConfigFromObject(Config, Class.Get("Config").AsObject());
-            }
+            Utility.SetConfigFromObject(Config, Class.GetProperty("Config"));
             base.SaveConfig();
         }
 
@@ -126,34 +107,30 @@ namespace Oxide.Ext.JavaScript.Plugins
             // Load the plugin
             string code = File.ReadAllText(Filename);
             Name = Path.GetFileNameWithoutExtension(Filename);
-            JavaScriptEngine.Execute(code, new ParserOptions { Source = Path.GetFileName(Filename) });
-            if (JavaScriptEngine.GetValue(Name).TryCast<ObjectInstance>() == null) throw new Exception("Plugin is missing main object");
-            Class = JavaScriptEngine.GetValue(Name).AsObject();
-            if (!Class.HasProperty("Name"))
-                Class.FastAddProperty("Name", Name, true, false, true);
-            else
-                Class.Put("Name", Name, true);
-
+            var compiled = JavaScriptEngine.Compile(code, Filename, true);
+            JavaScriptEngine.Execute(compiled, true);
+            if (JavaScriptEngine.GlobalObject.GetProperty(Name).ValueType == JSValueType.Undefined) throw new Exception("Plugin is missing main object");
+            Class = JavaScriptEngine.GlobalObject.GetProperty(Name);
+            Class.SetProperty("Name", JavaScriptEngine.CreateValue(Name));
             // Read plugin attributes
-            if (!Class.HasProperty("Title") || string.IsNullOrEmpty(Class.Get("Title").AsString())) throw new Exception("Plugin is missing title");
-            if (!Class.HasProperty("Author") || string.IsNullOrEmpty(Class.Get("Author").AsString())) throw new Exception("Plugin is missing author");
-            if (!Class.HasProperty("Version") || Class.Get("Version").ToObject() == null) throw new Exception("Plugin is missing version");
-            Title = Class.Get("Title").AsString();
-            Author = Class.Get("Author").AsString();
-            Version = (VersionNumber) Class.Get("Version").ToObject();
-            if (Class.HasProperty("ResourceId")) ResourceId = (int)Class.Get("ResourceId").AsNumber();
-            HasConfig = Class.HasProperty("HasConfig") && Class.Get("HasConfig").AsBoolean();
+            if (Class.GetProperty("Title").ValueType != JSValueType.String) throw new Exception("Plugin is missing title");
+            if (Class.GetProperty("Author").ValueType != JSValueType.String) throw new Exception("Plugin is missing author");
+            if (Class.GetProperty("Version").ValueType != JSValueType.Object) throw new Exception("Plugin is missing version");
+            Title = Class.GetProperty("Title").AsString;
+            Author = Class.GetProperty("Author").AsString;
+            Version = Class.GetProperty("Version").As<VersionNumber>();
+            if (Class.GetProperty("ResourceId")) ResourceId = (int)Class.Get("ResourceId").AsNumber();
+            HasConfig = Class.GetProperty("HasConfig").ValueType == JSValueType.Bool && Class.GetProperty("HasConfig").AsBoolean;
 
             // Set attributes
-            Class.FastAddProperty("Plugin", JsValue.FromObject(JavaScriptEngine, this), true, false, true);
+            Class.SetProperty("Plugin", JavaScriptEngine.CreateValue(this));
 
             Globals = new List<string>();
-            foreach (var property in Class.Properties)
+            foreach (var name in Class.GetPropertyNames())
             {
-                if (property.Value.Value != null)
+                if (Class.GetProperty(name).ValueType == JSValueType.Function)
                 {
-                    var callable = property.Value.Value.Value.TryCast<ICallable>();
-                    if (callable != null) Globals.Add(property.Key);
+                    Globals.Add(name);
                 }
             }
 
@@ -173,25 +150,28 @@ namespace Oxide.Ext.JavaScript.Plugins
         /// Binds the specified base method
         /// </summary>
         /// <param name="methodname"></param>
-        /// <param name="jsname"></param>
-        private void BindBaseMethod(string methodname, string jsname)
+        /// <param name="name"></param>
+        private void BindBaseMethod(string methodname, string name)
         {
             MethodInfo method = GetType().GetMethod(methodname, BindingFlags.Instance | BindingFlags.Static | BindingFlags.NonPublic);
-            var typeArgs = method.GetParameters()
-                    .Select(p => p.ParameterType)
-                    .ToList();
-
-            Type delegateType;
-            if (method.ReturnType == typeof(void))
+            var expectedParameters = method.GetParameters();
+            var template = JavaScriptEngine.CreateFunctionTemplate(name);
+            var plugin = this;
+            var convertedArguments = new object[expectedParameters.Length];
+            var func = template.GetFunctionObject((engine, call, @this, args) =>
             {
-                delegateType = Expression.GetActionType(typeArgs.ToArray());
-            }
-            else
-            {
-                typeArgs.Add(method.ReturnType);
-                delegateType = Expression.GetFuncType(typeArgs.ToArray());
-            }
-            Class.FastAddProperty(jsname, new DelegateWrapper(JavaScriptEngine, Delegate.CreateDelegate(delegateType, this, method)), true, false, true);
+                var argInfos = ArgInfo.GetArguments(args, 0, expectedParameters);
+                for (var paramIndex = 0; paramIndex < argInfos.Length; paramIndex++)
+                {
+                    var tInfo = argInfos[paramIndex];
+                    if (tInfo.HasError) throw tInfo.Error;
+                    convertedArguments[paramIndex] = tInfo.ValueOrDefault;
+                }
+                var result = method.Invoke(plugin, convertedArguments);
+                return method.ReturnType == typeof(void) ? InternalHandle.Empty : JavaScriptEngine.CreateValue(result, true);
+            });
+            Class.SetProperty(name, func);
+            funcs.Add(func);
         }
 
         /// <summary>
@@ -250,9 +230,9 @@ namespace Oxide.Ext.JavaScript.Plugins
         /// <returns></returns>
         private object CallFunction(string name, object[] args)
         {
-            var callable = Class.Get(name).TryCast<ICallable>();
-            if (!Globals.Contains(name) || !Class.HasProperty(name) || callable == null) return null;
-            return callable.Call(Class, args != null ? args.Select(x => JsValue.FromObject(JavaScriptEngine, x)).ToArray() : new JsValue[] {}).ToObject();
+            //Manager.Logger.Write(LogType.Info, "Call: " + name);
+            if (!Globals.Contains(name) || Class.GetProperty(name).ValueType != JSValueType.Function) return null;
+            return ((ObjectHandle)Class.GetProperty(name)).Call(Class, args != null ? args.Select(x => JavaScriptEngine.CreateValue(x)).ToArray() : new InternalHandle[] { });
         }
     }
 }

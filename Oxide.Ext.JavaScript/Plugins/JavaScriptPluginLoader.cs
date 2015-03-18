@@ -1,7 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.IO;
 
-using Jint;
+using V8.Net;
 
 using Oxide.Core.Plugins;
 using Oxide.Core.Plugins.Watchers;
@@ -16,7 +16,7 @@ namespace Oxide.Ext.JavaScript.Plugins
         /// <summary>
         /// Gets the JavaScript engine
         /// </summary>
-        public Engine JavaScriptEngine { get; private set; }
+        public V8Engine JavaScriptEngine { get; private set; }
 
         /// <summary>
         /// Gets or sets the watcher
@@ -27,7 +27,7 @@ namespace Oxide.Ext.JavaScript.Plugins
         /// Initializes a new instance of the JavaScriptPluginLoader class
         /// </summary>
         /// <param name="engine"></param>
-        public JavaScriptPluginLoader(Engine engine)
+        public JavaScriptPluginLoader(V8Engine engine)
         {
             JavaScriptEngine = engine;
         }

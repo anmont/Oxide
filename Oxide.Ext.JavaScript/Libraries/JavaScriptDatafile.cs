@@ -1,7 +1,6 @@
 ﻿using System.Collections.Generic;
 
-using Jint;
-using Jint.Native.Object;
+using V8.Net;
 
 using Oxide.Core;
 using Oxide.Core.Configuration;
@@ -22,18 +21,18 @@ namespace Oxide.Ext.JavaScript.Libraries
         /// <summary>
         /// Gets the JavaScript engine
         /// </summary>
-        public Engine JavaScriptEngine { get; private set; }
+        public V8Engine JavaScriptEngine { get; private set; }
 
         // The data file map
-        private readonly Dictionary<DynamicConfigFile, ObjectInstance> datafilemap;
+        private readonly Dictionary<DynamicConfigFile, InternalHandle> datafilemap;
 
         /// <summary>
-        /// Initializes a new instance of the LuaDatafile class
+        /// Initializes a new instance of the JavaScriptDatafile class
         /// <param name="engine"></param>
         /// </summary>
-        public JavaScriptDatafile(Engine engine)
+        public JavaScriptDatafile(V8Engine engine)
         {
-            datafilemap = new Dictionary<DynamicConfigFile, ObjectInstance>();
+            datafilemap = new Dictionary<DynamicConfigFile, InternalHandle>();
             JavaScriptEngine = engine;
         }
 
@@ -43,14 +42,14 @@ namespace Oxide.Ext.JavaScript.Libraries
         /// <param name="name"></param>
         /// <returns></returns>
         [LibraryFunction("GetData")]
-        public ObjectInstance GetData(string name)
+        public InternalHandle GetData(string name)
         {
             // Get the data file
             DynamicConfigFile datafile = Interface.GetMod().DataFileSystem.GetDatafile(name);
             if (datafile == null) return null;
 
             // Check if it already exists
-            ObjectInstance obj;
+            InternalHandle obj;
             if (datafilemap.TryGetValue(datafile, out obj)) return obj;
 
             // Create the table
@@ -73,7 +72,7 @@ namespace Oxide.Ext.JavaScript.Libraries
             if (datafile == null) return;
 
             // Get the table
-            ObjectInstance obj;
+            InternalHandle obj;
             if (!datafilemap.TryGetValue(datafile, out obj)) return;
 
             // Copy and save
